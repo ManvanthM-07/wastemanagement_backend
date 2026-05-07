@@ -16,7 +16,10 @@ const SECRET_KEY = 'eco_mysuru_premium_secret';
 // Initialize DB
 db.defaults({ users: [], complaints: [], tasks: [] }).write();
 
-app.use(cors());
+app.use(cors({
+    origin: ['https://ecomysore.vercel.app', 'http://localhost:3000'],
+    credentials: true
+}));
 // Increased limit for base64 images
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
