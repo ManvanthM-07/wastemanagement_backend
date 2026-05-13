@@ -1,26 +1,63 @@
+require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const low = require('lowdb');
-const FileSync = require('lowdb/adapters/FileSync');
+const { Pool } = require('pg');
 const path = require('path');
 
 const app = express();
-const adapter = new FileSync('db.json');
-const db = low(adapter);
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false
+    }
+});
+
+// Auto-create tables if they don't exist
+const initDb = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL,
+                approved BOOLEAN DEFAULT FALSE,
+                selected_wards JSONB DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS complaints (
+                id TEXT PRIMARY KEY,
+                category TEXT,
+                description TEXT,
+                reporter TEXT,
+                ward TEXT,
+                image TEXT,
+                date TEXT,
+                status TEXT DEFAULT 'submitted',
+                assigned_to TEXT,
+                worker_details JSONB DEFAULT '{}'
+            );
+        `);
+        console.log('Database tables verified/created successfully.');
+    } catch (err) {
+        console.error('Error initializing database:', err);
+    }
+};
+
+initDb();
+
 
 const SECRET_KEY = 'eco_mysuru_premium_secret';
-
-// Initialize DB
-db.defaults({ users: [], complaints: [], tasks: [] }).write();
 
 app.use(cors({
     origin: ['https://ecomysore.vercel.app', 'http://localhost:3000'],
     credentials: true
 }));
-// Increased limit for base64 images
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
@@ -30,71 +67,229 @@ app.use(express.static(path.join(__dirname, '../Wastemanagement')));
 // --- AUTH ROUTES ---
 
 app.post('/api/register', async (req, res) => {
-    const { username, password, role } = req.body;
-    const userExists = db.get('users').find({ username }).value();
+    const { username, password, role, selectedWards } = req.body;
     
-    if (userExists) return res.status(400).json({ message: 'User already exists' });
-    
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = { id: Date.now(), username, password: hashedPassword, role };
-    
-    db.get('users').push(newUser).write();
-    res.json({ message: 'Registration successful' });
+    if (role === 'admin') {
+        return res.status(403).json({ message: 'Administrative accounts must be created by system owners.' });
+    }
+
+    try {
+        const userExists = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        if (userExists.rows.length > 0) return res.status(400).json({ message: 'User already exists' });
+        
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const id = Date.now();
+        const approved = role !== 'worker';
+        
+        await pool.query(
+            'INSERT INTO users (id, username, password, role, approved, selected_wards) VALUES ($1, $2, $3, $4, $5, $6)',
+            [id, username, hashedPassword, role, approved, JSON.stringify(selectedWards || [])]
+        );
+        
+        res.json({ message: 'Registration successful' });
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 });
 
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    const user = db.get('users').find({ username }).value();
-    
-    if (!user) return res.status(400).json({ message: 'User not found' });
-    
-    const validPass = await bcrypt.compare(password, user.password);
-    if (!validPass) return res.status(400).json({ message: 'Invalid password' });
-    
-    const token = jwt.sign({ id: user.id, role: user.role, username: user.username }, SECRET_KEY);
-    res.json({ token, role: user.role, username: user.username });
+    try {
+        const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        const user = result.rows[0];
+        
+        if (!user) return res.status(400).json({ message: 'User not found' });
+        
+        const validPass = await bcrypt.compare(password, user.password);
+        if (!validPass) return res.status(400).json({ message: 'Invalid password' });
+
+        if (user.role === 'worker' && !user.approved) {
+            return res.status(403).json({ message: 'Your account is pending administrative approval.' });
+        }
+        
+        const token = jwt.sign({ id: user.id, role: user.role, username: user.username }, SECRET_KEY);
+        res.json({ token, role: user.role, username: user.username });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 });
 
 // --- COMPLAINT ROUTES ---
 
-app.post('/api/complaints', (req, res) => {
+app.post('/api/complaints', async (req, res) => {
     try {
-        const complaint = { 
-            ...req.body, 
-            id: `CMP-${Math.floor(1000 + Math.random() * 9000)}`, 
-            date: new Date().toISOString().split('T')[0], 
-            status: 'submitted' 
-        };
-        db.get('complaints').push(complaint).write();
-        res.json(complaint);
+        const id = `CMP-${Math.floor(1000 + Math.random() * 9000)}`;
+        const date = new Date().toISOString().split('T')[0];
+        const status = 'submitted';
+        const { category, desc, reporter, ward, image } = req.body;
+
+        await pool.query(
+            'INSERT INTO complaints (id, category, description, reporter, ward, image, date, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [id, category, desc, reporter, ward, image, date, status]
+        );
+
+        res.json({ id, category, desc, reporter, ward, image, date, status });
     } catch (error) {
         console.error('Error saving complaint:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
 
-app.get('/api/complaints', (req, res) => {
-    res.json(db.get('complaints').value());
+app.get('/api/complaints', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT id, category, description as desc, reporter, ward, image, date, status, assigned_to as "assignedTo", worker_details as "workerDetails" FROM complaints');
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching complaints:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 });
 
-app.patch('/api/complaints/:id', (req, res) => {
-    db.get('complaints').find({ id: req.params.id }).assign(req.body).write();
-    res.json({ success: true });
+app.patch('/api/complaints/:id', async (req, res) => {
+    const { status } = req.body;
+    const complaintId = req.params.id;
+
+    try {
+        const result = await pool.query('SELECT * FROM complaints WHERE id = $1', [complaintId]);
+        const complaint = result.rows[0];
+        
+        if (!complaint) return res.status(404).json({ message: 'Complaint not found' });
+
+        let updates = { ...req.body };
+        let assignedTo = complaint.assigned_to;
+        let workerDetails = complaint.worker_details;
+
+        if (status === 'progress' && !assignedTo) {
+            console.log(`Searching for worker in ward: ${complaint.ward}`);
+            const workersResult = await pool.query('SELECT * FROM users WHERE role = $1 AND approved = true', ['worker']);
+            const eligibleWorker = workersResult.rows.find(w => {
+                const wards = w.selected_wards || [];
+                return wards.includes(complaint.ward);
+            });
+
+            if (eligibleWorker) {
+                assignedTo = eligibleWorker.username;
+                workerDetails = {
+                    name: eligibleWorker.username,
+                    id: eligibleWorker.id,
+                    wards: eligibleWorker.selected_wards
+                };
+            }
+        }
+
+        // Prepare dynamic update query
+        const queryFields = [];
+        const values = [];
+        let counter = 1;
+
+        if (status) {
+            queryFields.push(`status = $${counter++}`);
+            values.push(status);
+        }
+        if (assignedTo) {
+            queryFields.push(`assigned_to = $${counter++}`);
+            values.push(assignedTo);
+        }
+        if (workerDetails) {
+            queryFields.push(`worker_details = $${counter++}`);
+            values.push(JSON.stringify(workerDetails));
+        }
+
+        if (queryFields.length > 0) {
+            values.push(complaintId);
+            await pool.query(`UPDATE complaints SET ${queryFields.join(', ')} WHERE id = $${counter}`, values);
+        }
+
+        res.json({ success: true, assignedTo });
+    } catch (error) {
+        console.error('Error updating complaint:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// --- ADMIN MANAGEMENT ROUTES ---
+
+app.get('/api/admin/workers', async (req, res) => {
+    try {
+        const workersResult = await pool.query('SELECT id, username, selected_wards as "selectedWards" FROM users WHERE role = $1 AND approved = true', ['worker']);
+        const complaintsResult = await pool.query('SELECT assigned_to, status FROM complaints WHERE assigned_to IS NOT NULL');
+        
+        const workers = workersResult.rows.map(worker => {
+            const workerTasks = complaintsResult.rows.filter(c => c.assigned_to === worker.username);
+            const activeTasks = workerTasks.filter(c => c.status !== 'resolved' && c.status !== 'closed').length;
+            const completedTasks = workerTasks.filter(c => c.status === 'resolved' || c.status === 'closed').length;
+            
+            return {
+                ...worker,
+                activeTasks,
+                completedTasks,
+                status: activeTasks > 0 ? 'Active' : 'Idle'
+            };
+        });
+        
+        res.json(workers);
+    } catch (error) {
+        console.error('Error fetching workers:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+app.get('/api/admin/workers/pending', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM users WHERE role = $1 AND approved = false', ['worker']);
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching pending workers:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+app.post('/api/admin/workers/approve/:id', async (req, res) => {
+    try {
+        await pool.query('UPDATE users SET approved = true WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error approving worker:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 });
 
 // --- WORKER ROUTES ---
 
-app.get('/api/tasks/:workerId', (req, res) => {
-    const tasks = db.get('complaints').filter({ assignedTo: req.params.workerId }).value();
-    res.json(tasks);
+app.get('/api/tasks/:workerId', async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, category, description as desc, reporter, ward, image, date, status, assigned_to as "assignedTo", worker_details as "workerDetails" FROM complaints WHERE assigned_to = $1',
+            [req.params.workerId]
+        );
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching tasks:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 });
 
-// Serve index.html for all other routes to support SPA if needed
 app.use((req, res) => {
     res.sendFile(path.join(__dirname, '../Wastemanagement/index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Premium Backend running at http://localhost:${PORT}`);
+// --- DEBUG ROUTES ---
+app.get('/api/debug/db', async (req, res) => {
+    try {
+        const users = await pool.query('SELECT * FROM users');
+        const complaints = await pool.query('SELECT * FROM complaints');
+        res.json({
+            users: users.rows,
+            complaints: complaints.rows
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.listen(3000, () => {
+    console.log('Premium Backend running with PostgreSQL at http://localhost:3000');
 });
