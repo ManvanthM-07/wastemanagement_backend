@@ -16,6 +16,17 @@ const pool = new Pool({
     }
 });
 
+// --- CLOUD CONNECTION GUARD ---
+if (!process.env.DATABASE_URL) {
+    console.error('************************************************');
+    console.error('CRITICAL ERROR: DATABASE_URL is NOT defined!');
+    console.error('Please go to Render Dashboard -> Settings -> Environment Variables');
+    console.error('Add a variable named DATABASE_URL with your Aiven connection string.');
+    console.error('************************************************');
+} else {
+    console.log('DATABASE_URL detected. Attempting to connect to cloud database...');
+}
+
 // Auto-create tables if they don't exist
 const initDb = async () => {
     try {
@@ -127,8 +138,11 @@ app.post('/api/register', async (req, res) => {
         res.json({ message: 'Registration successful' });
     } catch (error) {
         console.error('Registration error:', error);
-        // Returning detailed error message to help the user debug on the frontend
-        res.status(500).json({ message: `Backend Error: ${error.message}` });
+        const errorMessage = error.message || error.code || JSON.stringify(error);
+        res.status(500).json({ 
+            message: `Backend Error: ${errorMessage}`,
+            detail: error.stack
+        });
     }
 });
 
