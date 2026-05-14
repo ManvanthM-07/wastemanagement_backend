@@ -24,7 +24,10 @@ if (!process.env.DATABASE_URL) {
     console.error('Add a variable named DATABASE_URL with your Aiven connection string.');
     console.error('************************************************');
 } else {
-    console.log('DATABASE_URL detected. Attempting to connect to cloud database...');
+    const sanitizedUrl = process.env.DATABASE_URL.replace(/:[^:@/]+@/, ':****@');
+    console.log('DATABASE_URL detected. Length:', process.env.DATABASE_URL.length);
+    console.log('Sanitized URL:', sanitizedUrl);
+    console.log('Attempting to connect to cloud database...');
 }
 
 // Auto-create tables if they don't exist
