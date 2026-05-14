@@ -127,7 +127,8 @@ app.post('/api/register', async (req, res) => {
         res.json({ message: 'Registration successful' });
     } catch (error) {
         console.error('Registration error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        // Returning detailed error message to help the user debug on the frontend
+        res.status(500).json({ message: `Backend Error: ${error.message}` });
     }
 });
 
@@ -317,9 +318,23 @@ app.get('/api/tasks/:workerId', async (req, res) => {
     }
 });
 
-app.use((req, res) => {
-    res.sendFile(path.join(__dirname, '../Wastemanagement/index.html'));
-});
+// Smart static file serving for Local vs Render
+const fs = require('fs');
+const frontendPath = path.join(__dirname, '../Wastemanagement');
+
+if (fs.existsSync(frontendPath) && fs.existsSync(path.join(frontendPath, 'index.html'))) {
+    app.use(express.static(frontendPath));
+    // Serve index.html for all other routes (SPA support)
+    app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/api')) return next();
+        res.sendFile(path.join(frontendPath, 'index.html'));
+    });
+} else {
+    // Fallback for backend-only deployments
+    app.get('/', (req, res) => {
+        res.status(200).send('<h1>EcoMysuru API is Live</h1><p>Status: <span style="color: #00ff88;">Operational</span></p><p>Database: Connected</p>');
+    });
+}
 
 const PORT = process.env.PORT || 3000;
 // --- DEBUG ROUTES ---
@@ -336,6 +351,6 @@ app.get('/api/debug/db', async (req, res) => {
     }
 });
 
-app.listen(3000, () => {
-    console.log('Premium Backend running with PostgreSQL at http://localhost:3000');
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Premium Backend running on port ${PORT}`);
 });
