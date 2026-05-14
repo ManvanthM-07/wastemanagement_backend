@@ -32,6 +32,7 @@ const initDb = async () => {
             CREATE TABLE IF NOT EXISTS complaints (
                 id TEXT PRIMARY KEY,
                 category TEXT,
+                subcategory TEXT,
                 description TEXT,
                 reporter TEXT,
                 ward TEXT,
@@ -39,8 +40,24 @@ const initDb = async () => {
                 date TEXT,
                 status TEXT DEFAULT 'submitted',
                 assigned_to TEXT,
-                worker_details JSONB DEFAULT '{}'
+                worker_details JSONB DEFAULT '{}',
+                resolved_proof TEXT,
+                resolved_date TEXT
             );
+
+            -- Ensure missing columns exist if table was already created
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='complaints' AND column_name='subcategory') THEN
+                    ALTER TABLE complaints ADD COLUMN subcategory TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='complaints' AND column_name='resolved_proof') THEN
+                    ALTER TABLE complaints ADD COLUMN resolved_proof TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='complaints' AND column_name='resolved_date') THEN
+                    ALTER TABLE complaints ADD COLUMN resolved_date TEXT;
+                END IF;
+            END $$;
         `);
         console.log('Database tables verified/created successfully.');
     } catch (err) {
@@ -123,14 +140,14 @@ app.post('/api/complaints', async (req, res) => {
         const id = `CMP-${Math.floor(1000 + Math.random() * 9000)}`;
         const date = new Date().toISOString().split('T')[0];
         const status = 'submitted';
-        const { category, desc, reporter, ward, image } = req.body;
+        const { category, subcategory, desc, reporter, ward, image } = req.body;
 
         await pool.query(
-            'INSERT INTO complaints (id, category, description, reporter, ward, image, date, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-            [id, category, desc, reporter, ward, image, date, status]
+            'INSERT INTO complaints (id, category, subcategory, description, reporter, ward, image, date, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            [id, category, subcategory, desc, reporter, ward, image, date, status]
         );
 
-        res.json({ id, category, desc, reporter, ward, image, date, status });
+        res.json({ id, category, subcategory, desc, reporter, ward, image, date, status });
     } catch (error) {
         console.error('Error saving complaint:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -139,7 +156,7 @@ app.post('/api/complaints', async (req, res) => {
 
 app.get('/api/complaints', async (req, res) => {
     try {
-        const result = await pool.query('SELECT id, category, description as desc, reporter, ward, image, date, status, assigned_to as "assignedTo", worker_details as "workerDetails" FROM complaints');
+        const result = await pool.query('SELECT id, category, subcategory, description as desc, reporter, ward, image, date, status, assigned_to as "assignedTo", worker_details as "workerDetails" FROM complaints');
         res.json(result.rows);
     } catch (error) {
         console.error('Error fetching complaints:', error);
@@ -187,12 +204,20 @@ app.patch('/api/complaints/:id', async (req, res) => {
         if (status) {
             queryFields.push(`status = $${counter++}`);
             values.push(status);
+            
+            // If reopening (setting back to submitted), clear assignment and proof
+            if (status === 'submitted') {
+                queryFields.push(`assigned_to = NULL`);
+                queryFields.push(`worker_details = '{}'`);
+                queryFields.push(`resolved_proof = NULL`);
+                queryFields.push(`resolved_date = NULL`);
+            }
         }
-        if (assignedTo) {
+        if (assignedTo && status !== 'submitted') {
             queryFields.push(`assigned_to = $${counter++}`);
             values.push(assignedTo);
         }
-        if (workerDetails) {
+        if (workerDetails && status !== 'submitted') {
             queryFields.push(`worker_details = $${counter++}`);
             values.push(JSON.stringify(workerDetails));
         }
@@ -238,7 +263,7 @@ app.get('/api/admin/workers', async (req, res) => {
 
 app.get('/api/admin/workers/pending', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM users WHERE role = $1 AND approved = false', ['worker']);
+        const result = await pool.query('SELECT id, username, selected_wards as "selectedWards" FROM users WHERE role = $1 AND approved = false', ['worker']);
         res.json(result.rows);
     } catch (error) {
         console.error('Error fetching pending workers:', error);
