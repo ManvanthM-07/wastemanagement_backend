@@ -29,6 +29,17 @@ const initDb = async () => {
                 selected_wards JSONB DEFAULT '[]'
             );
 
+            -- Ensure users table columns exist if table was already created
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='approved') THEN
+                    ALTER TABLE users ADD COLUMN approved BOOLEAN DEFAULT FALSE;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='selected_wards') THEN
+                    ALTER TABLE users ADD COLUMN selected_wards JSONB DEFAULT '[]';
+                END IF;
+            END $$;
+
             CREATE TABLE IF NOT EXISTS complaints (
                 id TEXT PRIMARY KEY,
                 category TEXT,
@@ -71,7 +82,17 @@ initDb();
 const SECRET_KEY = 'eco_mysuru_premium_secret';
 
 app.use(cors({
-    origin: ['https://ecomysore.vercel.app', 'http://localhost:3000'],
+    origin: function (origin, callback) {
+        // Allow local, Vercel, and any Render deployment
+        if (!origin || 
+            origin.endsWith('.onrender.com') || 
+            origin.includes('localhost') || 
+            origin === 'https://ecomysore.vercel.app') {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true
 }));
 
@@ -95,7 +116,7 @@ app.post('/api/register', async (req, res) => {
         if (userExists.rows.length > 0) return res.status(400).json({ message: 'User already exists' });
         
         const hashedPassword = await bcrypt.hash(password, 10);
-        const id = Date.now();
+        const id = String(Date.now());
         const approved = role !== 'worker';
         
         await pool.query(
