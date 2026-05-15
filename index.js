@@ -6,6 +6,10 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const path = require('path');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const apiKey = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.replace(/['"]+/g, '').trim() : null;
+const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
 const app = express();
 
@@ -115,6 +119,176 @@ app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
 // Serve frontend from the sibling directory
 app.use(express.static(path.join(__dirname, '../Wastemanagement')));
+
+// --- AI ANALYSIS ROUTE ---
+
+app.post('/api/analyze-image', async (req, res) => {
+    const { image } = req.body;
+    if (!image) return res.status(400).json({ message: 'No image provided' });
+
+    const simulatedCases = [
+        {
+            category: "Waste Management",
+            subcategory: "Overflowing garbage bins",
+            description: "Severe waste overflow detected at the collection point.",
+            priority: "High",
+            reasoning: "Bio-hazard potential and visual pollution."
+        },
+        {
+            category: "Road & Infrastructure",
+            subcategory: "Potholes",
+            description: "Deep pothole detected on the main road surface.",
+            priority: "Medium",
+            reasoning: "Traffic safety hazard and vehicle damage risk."
+        },
+        {
+            category: "Sewage & Drainage",
+            subcategory: "Clogged Drain",
+            description: "Stormwater drain is blocked with debris, causing water logging.",
+            priority: "High",
+            reasoning: "Risk of flooding and stagnant water issues."
+        },
+        {
+            category: "Public Hygiene",
+            subcategory: "Public Littering",
+            description: "Accumulation of plastic waste in a public park area.",
+            priority: "Low",
+            reasoning: "Environmental cleanliness and aesthetic concern."
+        },
+        {
+            category: "Smart City Maintenance",
+            subcategory: "Broken Streetlight",
+            description: "Functional failure of public lighting unit.",
+            priority: "Medium",
+            reasoning: "Public safety concern during night hours."
+        },
+        {
+            category: "Animal-Related",
+            subcategory: "Stray Animal Menace",
+            description: "Aggressive stray dogs reported in the residential area.",
+            priority: "Medium",
+            reasoning: "Safety of pedestrians and children."
+        }
+    ];
+
+    const validCategories = {
+        "Waste Management": [
+            "Overflowing garbage bins", "Illegal dumping", "Uncollected garbage", "Construction waste dumping",
+            "Plastic waste accumulation", "Biomedical waste", "E-waste disposal", "Dead animal disposal",
+            "Sewage waste", "Burning garbage", "Waste near lakes/drains", "Market waste overflow"
+        ],
+        "Sewage & Drainage": [
+            "Drain overflow", "Sewage leakage", "Blocked drainage", "Water stagnation", "Open manholes",
+            "Bad smell zones", "Flooded streets after rain"
+        ],
+        "Public Hygiene": [
+            "Public toilet unclean", "No dustbins nearby", "Mosquito breeding areas", "Rodent infestation",
+            "Stray animal waste", "Dirty bus stops", "Dirty parks"
+        ],
+        "Road & Infrastructure": [
+            "Potholes", "Damaged roads", "Broken footpaths", "Illegal road dumping",
+            "Broken streetlights", "Fallen trees", "Damaged public benches", "Broken traffic signals"
+        ],
+        "Environmental": [
+            "Air pollution zones", "Water pollution", "Tree cutting", "Lake contamination",
+            "Noise pollution", "Industrial dumping", "Smoke emissions", "Chemical leakage"
+        ],
+        "Public Safety Hazards": [
+            "Exposed electric wires", "Open drains", "Unsafe construction debris", "Sharp waste materials",
+            "Fire hazards", "Broken transformers", "Dangerous abandoned vehicles"
+        ],
+        "Animal-Related": [
+            "Dead animals", "Stray dog clusters", "Injured animals", "Animal waste zones", "Cattle blocking roads"
+        ],
+        "Smart City Maintenance": [
+            "Smart bin malfunction", "Sensor failure", "Garbage truck delay", "Public WiFi issue",
+            "CCTV not working", "Smart streetlight issue"
+        ],
+        "Water Management": [
+            "Water leakage", "Pipe burst", "Water contamination", "No water supply", "Overflowing tanks"
+        ],
+        "Emergency Civic Alerts": [
+            "Biomedical waste near school", "Toxic chemical dumping", "Large sewage overflow",
+            "Flood emergency", "Fire waste hazard", "Garbage near hospital"
+        ]
+    };
+
+    try {
+        if (!genAI) {
+            console.error("GEMINI_API_KEY is missing or invalid!");
+            throw new Error("No API Key");
+        }
+
+        console.log("--- AI Analysis Request ---");
+        console.log("Image Data Received. Length:", image.length);
+        
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+        const base64Data = image.split(',')[1] || image;
+        const mimeType = image.split(';')[0].split(':')[1] || "image/jpeg";
+        
+        console.log("Detected MimeType:", mimeType);
+        console.log("Calling Gemini AI...");
+
+        const prompt = `
+            You are the "EcoMysuru Vision Engine," a state-of-the-art AI dedicated to maintaining the cleanliness and safety of Mysuru City.
+            Your goal is 100% precision in identifying civic issues.
+
+            CATEGORIES AND VALID SUBCATEGORIES:
+            ${JSON.stringify(validCategories, null, 2)}
+
+            RIGOROUS ANALYSIS PROTOCOL:
+            Step 1: Describe every visual element in the image related to civic infrastructure or environment.
+            Step 2: Identify the primary problem. Is it waste, water, road damage, or a safety hazard?
+            Step 3: Cross-reference the identified problem with the 'CATEGORIES' list.
+            Step 4: Select the most specific 'subcategory' that matches the visual evidence.
+            Step 5: Determine Priority:
+               - HIGH: Immediate threat to life, health, or infrastructure (e.g., open manholes, flooding, fire, toxic waste, live wires).
+               - MEDIUM: Significant service disruption or safety risk (e.g., large potholes, overflowing bins, broken streetlights).
+               - LOW: Aesthetic or minor maintenance issues (e.g., littering, overgrown grass, broken benches).
+
+            OUTPUT REQUIREMENTS:
+            - Return ONLY a valid JSON object.
+            - Ensure 'category' matches EXACTLY one of the provided keys.
+            - Ensure 'subcategory' is as specific as possible.
+            - Provide a 'reasoning' that reflects your step-by-step analysis.
+
+            JSON FORMAT:
+            {
+                "category": "String",
+                "subcategory": "String",
+                "description": "String",
+                "priority": "Low | Medium | High",
+                "reasoning": "String"
+            }
+        `;
+
+        const result = await model.generateContent([
+            prompt,
+            { inlineData: { data: base64Data, mimeType } }
+        ]);
+
+        const responseText = result.response.text();
+        console.log("Gemini Raw Response:", responseText);
+        
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        const data = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(responseText);
+        
+        console.log("Parsed AI Data:", data);
+        res.json({ ...data, isSimulated: false });
+    } catch (error) {
+        console.error('AI Analysis Error:', error.message);
+        if (error.stack) console.error(error.stack);
+        
+        const selectedCase = simulatedCases[Math.floor(Math.random() * simulatedCases.length)];
+        console.log("Falling back to simulation:", selectedCase.category);
+        
+        res.json({ 
+            ...selectedCase, 
+            isSimulated: true, 
+            errorNote: error.message === "No API Key" ? "Demo Mode Active" : `AI connection issue: ${error.message}` 
+        });
+    }
+});
 
 // --- AUTH ROUTES ---
 
@@ -342,7 +516,7 @@ const frontendPath = path.join(__dirname, '../Wastemanagement');
 if (fs.existsSync(frontendPath) && fs.existsSync(path.join(frontendPath, 'index.html'))) {
     app.use(express.static(frontendPath));
     // Serve index.html for all other routes (SPA support)
-    app.get('*', (req, res, next) => {
+    app.get(/.*/, (req, res, next) => {
         if (req.path.startsWith('/api')) return next();
         res.sendFile(path.join(frontendPath, 'index.html'));
     });
